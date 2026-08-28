@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tower of Notepad (EToH).txt - 메모장</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: #008080;
+            font-family: "Consolas", "Courier New", monospace;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            user-select: none;
+        }
+
+        .window {
+            width: 640px;
+            background: #c0c0c0;
+            border: 2px solid #ffffff;
+            border-right-color: #000000;
+            border-bottom-color: #000000;
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.5);
+        }
+
+        .title-bar {
+            background: #000080;
+            color: white;
+            padding: 3px 6px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+        }
+
+        .menu-bar {
+            background: #c0c0c0;
+            padding: 2px 6px;
+            border-bottom: 1px solid #808080;
+            font-size: 13px;
+        }
+
+        .menu-bar span {
+            margin-right: 10px;
+        }
+
+        #game-canvas {
+            background: #ffffff;
+            display: block;
+            margin: 0 auto;
+            border: 2px solid #808080;
+        }
+
+        .status-bar {
+            background: #c0c0c0;
+            border-top: 1px solid #ffffff;
+            padding: 3px 6px;
+            font-size: 12px;
+            color: #000;
+        }
+    </style>
+</head>
+<body>
+
+<div class="window">
+    <div class="title-bar">
+        <span>Tower of Notepad Physics.txt - 메모장</span>
+        <span>[X]</span>
+    </div>
+    <div class="menu-bar">
+        <span>파일(F)</span><span>편집(E)</span><span>서식(O)</span><span>보기(V)</span><span>도움말(H)</span>
+    </div>
+    
+    <canvas id="game-canvas" width="600" height="500"></canvas>
+    
+    <div class="status-bar" id="status">
+        이동: A/D 또는 방향키 | 점프: Space
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game-canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+
+// 같은 Wi-Fi 내 파이썬 서버 IP 입력
+const serverIP = prompt("서버 컴퓨터의 IP 주소를 입력하세요 (혼자 실행 시 localhost):", "localhost");
+let socket = null;
+
+try {
+    socket = new WebSocket(`ws://${serverIP}:8765`);
+} catch (e) {
+    console.log("서버 연결 실패, 오프라인 싱글플레이로 진행합니다.");
+}
+
+let players = [];
+let localPlayer = {
+    x: 50,
+    y: 430,
+    vx: 0,
+    vy: 0,
+    width: 20,
+    height: 20,
+    grounded: false,
+    floor: 1
+};
+
+const keys = {};
+
+window.addEventListener('keydown', e => keys[e.code] = true);
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+// EToH 타워 맵 데이터
+// type: 'p' (발판), 'k' (킬파츠), 'win' (다음 층)
+const mapData = {
+    1: [
+        {x: 0, y: 480, w: 600, h: 20, type: 'p', text: '==================== FLOOR 1 ===================='},
+        {x: 100, y: 410, w: 80, h: 15, type: 'p', text: '[---]'},
+        {x: 230, y: 350, w: 60, h: 15, type: 'p', text: '[---]'},
+        {x: 320, y: 350, w: 60, h: 15, type: 'k', text: 'X KILL X'},
+        {x: 420, y: 290, w: 80, h: 15, type: 'p', text: '[---]'},
+        {x: 520, y: 220, w: 60, h: 15, type: 'win', text: '^^ UP ^^'}
+    ],
+    2: [
+        {x: 0, y: 480, w: 600, h: 20, type: 'p', text: '==================== FLOOR 2 ===================='},
+        {x: 480, y: 400, w: 70, h: 15, type: 'p', text: '[---]'},
+        {x: 350, y: 330, w: 60, h: 15, type: 'k', text: 'X K X'},
+        {x: 220, y: 270, w: 60, h: 15, type: 'p', text: '[---]'},
+        {x: 80, y: 200, w: 80, h: 15, type: 'win', text: '^^ WIN ^^'}
+    ]
+};
+
+if (socket) {
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'state') {
+            players = data.players;
+        }
+    };
+}
+
+function updatePhysics() {
+    // 이동
+    if (keys['ArrowRight'] || keys['KeyD']) localPlayer.vx = 4;
+    else if (keys['ArrowLeft'] || keys['KeyA']) localPlayer.vx = -4;
+    else localPlayer.vx = 0;
+
+    // 점프
+    if ((keys['Space'] || keys['ArrowUp'] || keys['KeyW']) && localPlayer.grounded) {
+        localPlayer.vy = -10;
+        localPlayer.grounded = false;
+    }
+
+    // 중력
+    localPlayer.vy += 0.5;
+
+    localPlayer.x += localPlayer.vx;
+    localPlayer.y += localPlayer.vy;
+
+    // 벽 충돌
+    if (localPlayer.x < 0) localPlayer.x = 0;
+    if (localPlayer.x + localPlayer.width > canvas.width) localPlayer.x = canvas.width - localPlayer.width;
+
+    // 발판 충돌
+    localPlayer.grounded = false;
+    const currentPlatforms = mapData[localPlayer.floor] || [];
+
+    for (let plat of currentPlatforms) {
+        if (
+            localPlayer.x < plat.x + plat.w &&
+            localPlayer.x + localPlayer.width > plat.x &&
+            localPlayer.y + localPlayer.height > plat.y &&
+            localPlayer.y + localPlayer.height - localPlayer.vy <= plat.y
+        ) {
+            if (plat.type === 'k') {
+                // 킬파츠: 리스폰
+                localPlayer.x = 50;
+                localPlayer.y = 430;
+                localPlayer.vy = 0;
+                break;
+            } else if (plat.type === 'win') {
+                // 다음 층
+                if (mapData[localPlayer.floor + 1]) {
+                    localPlayer.floor += 1;
+                    localPlayer.x = 50;
+                    localPlayer.y = 430;
+                    localPlayer.vy = 0;
+                } else {
+                    alert("타워 클리어!");
+                    localPlayer.floor = 1;
+                    localPlayer.x = 50;
+                    localPlayer.y = 430;
+                }
+                break;
+            } else {
+                localPlayer.y = plat.y - localPlayer.height;
+                localPlayer.vy = 0;
+                localPlayer.grounded = true;
+            }
+        }
+    }
+
+    // 추락 리셋
+    if (localPlayer.y > canvas.height) {
+        localPlayer.x = 50;
+        localPlayer.y = 430;
+        localPlayer.vy = 0;
+    }
+
+    // 위치 서버 전송
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+            type: 'update',
+            x: localPlayer.x,
+            y: localPlayer.y,
+            floor: localPlayer.floor
+        }));
+    }
+}
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const currentPlatforms = mapData[localPlayer.floor] || [];
+    ctx.font = "14px Consolas";
+
+    // 맵 지형 렌더링
+    for (let plat of currentPlatforms) {
+        if (plat.type === 'k') ctx.fillStyle = "red";
+        else if (plat.type === 'win') ctx.fillStyle = "blue";
+        else ctx.fillStyle = "black";
+
+        ctx.fillText(plat.text, plat.x, plat.y + 12);
+    }
+
+    // 다른 멀티플레이어 렌더링
+    for (let p of players) {
+        if (p.floor === localPlayer.floor) {
+            ctx.fillStyle = "#888888";
+            ctx.fillRect(p.x, p.y, 20, 20);
+            ctx.fillStyle = "black";
+            ctx.font = "10px Consolas";
+            ctx.fillText(p.name, p.x - 5, p.y - 4);
+        }
+    }
+
+    // 내 캐릭터 ('옷' 형태) 렌더링
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(localPlayer.x, localPlayer.y, localPlayer.width, localPlayer.height);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "12px Consolas";
+    ctx.fillText("옷", localPlayer.x + 3, localPlayer.y + 14);
+
+    statusEl.innerText = `현재 층: Floor ${localPlayer.floor} | 동시 접속자: ${players.length}명`;
+}
+
+function loop() {
+    updatePhysics();
+    render();
+    requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
