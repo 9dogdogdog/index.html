@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>멀티플레이 아케이드 - 1:1 대전 Pong</title>
+<title>멀티플레이 아케이드 - 오목 추가</title>
 <!-- P2P 통신 라이브러리 -->
 <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 <style>
@@ -108,6 +108,7 @@
     <select id="game-selector" onchange="changeGame(this.value, true)">
       <option value="bug">1. 버그 잡기 (협동)</option>
       <option value="pong">2. 핑퐁 (1:1 대전)</option>
+      <option value="omok">3. 오목 (1:1 대전)</option>
     </select>
   </div>
 
@@ -218,12 +219,19 @@
       }
 
       if (data.type === 'pong_ball') {
-        // 호스트 기준 데이터를 받아서 게스트 시점으로 반전/동기화
         if (!isHost) {
           ball.x = canvas.width - data.x;
           ball.y = data.y;
           pongScore = { my: data.score.guest, op: data.score.host };
         }
+      }
+
+      if (data.type === 'omok_place') {
+        placeStone(data.row, data.col, data.color);
+      }
+
+      if (data.type === 'omok_reset') {
+        initOmokGame();
       }
     });
   }
@@ -236,6 +244,8 @@
       initBugGame();
     } else if (gameName === 'pong') {
       initPongGame();
+    } else if (gameName === 'omok') {
+      initOmokGame();
     }
 
     if (notifyRemote && conn && conn.open) {
@@ -291,6 +301,56 @@
     hostScore = { host: 0, guest: 0 };
   }
 
+  // 3. 오목 게임
+  const boardSize = 15;
+  const gridCellSize = 24;
+  const boardOffsetX = 220;
+  const boardOffsetY = 20;
+  let omokBoard = [];
+  let currentTurn = 1; // 1: 흑돌 (호스트/선공), 2: 백돌 (게스트/후공)
+  let omokWinner = 0;
+
+  function initOmokGame() {
+    omokBoard = Array.from({ length: boardSize }, () => Array(boardSize).fill(0));
+    currentTurn = 1;
+    omokWinner = 0;
+  }
+
+  function placeStone(row, col, color) {
+    if (omokBoard[row][col] !== 0 || omokWinner !== 0) return;
+
+    omokBoard[row][col] = color;
+    if (checkOmokWin(row, col, color)) {
+      omokWinner = color;
+    } else {
+      currentTurn = currentTurn === 1 ? 2 : 1;
+    }
+  }
+
+  function checkOmokWin(r, c, color) {
+    const directions = [
+      [[0, 1], [0, -1]],   // 가로
+      [[1, 0], [-1, 0]],   // 세로
+      [[1, 1], [-1, -1]],  // 대각선 ↘
+      [[1, -1], [-1, 1]]   // 대각선 ↙
+    ];
+
+    for (let d of directions) {
+      let count = 1;
+      for (let [dr, dc] of d) {
+        let nr = r + dr;
+        let nc = c + dc;
+        while (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize && omokBoard[nr][nc] === color) {
+          count++;
+          nr += dr;
+          nc += dc;
+        }
+      }
+      if (count >= 5) return true;
+    }
+    return false;
+  }
+
   canvas.addEventListener('mousemove', (e) => {
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -309,14 +369,38 @@
   });
 
   canvas.addEventListener('click', (e) => {
-    if (currentGame === 'bug') {
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
 
+    if (currentGame === 'bug') {
       checkBugCatch(x, y);
       if (conn && conn.open) {
         conn.send({ type: 'mouse', x: x, y: y, click: true });
+      }
+    } else if (currentGame === 'omok') {
+      const myColor = isHost ? 1 : 2;
+
+      // 승리 후 재시작 클릭
+      if (omokWinner !== 0) {
+        initOmokGame();
+        if (conn && conn.open) conn.send({ type: 'omok_reset' });
+        return;
+      }
+
+      // 내 턴일 때만 돌 착수 가능
+      if (currentTurn !== myColor) return;
+
+      const col = Math.round((x - boardOffsetX) / gridCellSize);
+      const row = Math.round((y - boardOffsetY) / gridCellSize);
+
+      if (row >= 0 && row < boardSize && col >= 0 && col < boardSize) {
+        if (omokBoard[row][col] === 0) {
+          placeStone(row, col, myColor);
+          if (conn && conn.open) {
+            conn.send({ type: 'omok_place', row: row, col: col, color: myColor });
+          }
+        }
       }
     }
   });
@@ -356,7 +440,6 @@
       }
 
     } else if (currentGame === 'pong') {
-      // 대전 판 중앙선
       ctx.strokeStyle = '#2a2a3a';
       ctx.setLineDash([6, 6]);
       ctx.beginPath();
@@ -365,34 +448,28 @@
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // 내 패들(왼쪽: 파란색) & 상대방 패들(오른쪽: 분홍색)
       ctx.fillStyle = '#00f0ff';
       ctx.fillRect(20, myPaddleY, paddleWidth, paddleHeight);
 
       ctx.fillStyle = '#ff0055';
       ctx.fillRect(canvas.width - 20 - paddleWidth, remotePaddleY, paddleWidth, paddleHeight);
 
-      // 호스트가 공 물리 연산 담당
       if (isHost || !conn) {
         ball.x += ball.dx;
         ball.y += ball.dy;
 
-        // 천장/바닥 충돌
         if (ball.y - ball.size < 0 || ball.y + ball.size > canvas.height) {
           ball.dy *= -1;
         }
 
-        // 호스트 패들(왼쪽) 충돌
         if (ball.x - ball.size <= 20 + paddleWidth && ball.y >= myPaddleY && ball.y <= myPaddleY + paddleHeight) {
-          ball.dx = Math.abs(ball.dx) * 1.05; // 속도 약간 증가
+          ball.dx = Math.abs(ball.dx) * 1.05;
         }
 
-        // 게스트 패들(오른쪽) 충돌
         if (ball.x + ball.size >= canvas.width - 20 - paddleWidth && ball.y >= remotePaddleY && ball.y <= remotePaddleY + paddleHeight) {
           ball.dx = -Math.abs(ball.dx) * 1.05;
         }
 
-        // 득점 판정
         if (ball.x < 0) {
           hostScore.guest++;
           resetBall(1);
@@ -412,18 +489,84 @@
         ball = { x: 400, y: 200, dx: dir * 5, dy: (Math.random() - 0.5) * 6, size: 8 };
       }
 
-      // 공 그리기
       ctx.fillStyle = '#fff';
       ctx.beginPath();
       ctx.arc(ball.x, ball.y, ball.size, 0, Math.PI * 2);
       ctx.fill();
 
-      // 점수 표시 (내 점수 : 상대방 점수)
       ctx.font = '24px monospace';
       ctx.fillStyle = '#00f0ff';
       ctx.fillText(`YOU: ${pongScore.my}`, canvas.width / 2 - 140, 40);
       ctx.fillStyle = '#ff0055';
       ctx.fillText(`${targetNickname || 'P2'}: ${pongScore.op}`, canvas.width / 2 + 30, 40);
+
+    } else if (currentGame === 'omok') {
+      // 오목판 배경 (우드 톤)
+      ctx.fillStyle = '#221a14';
+      ctx.fillRect(boardOffsetX - 15, boardOffsetY - 15, (boardSize - 1) * gridCellSize + 30, (boardSize - 1) * gridCellSize + 30);
+
+      // 격자선
+      ctx.strokeStyle = '#5c4632';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < boardSize; i++) {
+        ctx.beginPath();
+        ctx.moveTo(boardOffsetX + i * gridCellSize, boardOffsetY);
+        ctx.lineTo(boardOffsetX + i * gridCellSize, boardOffsetY + (boardSize - 1) * gridCellSize);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(boardOffsetX, boardOffsetY + i * gridCellSize);
+        ctx.lineTo(boardOffsetX + (boardSize - 1) * gridCellSize, boardOffsetY + i * gridCellSize);
+        ctx.stroke();
+      }
+
+      // 오목 돌 렌더링
+      for (let r = 0; r < boardSize; r++) {
+        for (let c = 0; c < boardSize; c++) {
+          const val = omokBoard[r][c];
+          if (val !== 0) {
+            const px = boardOffsetX + c * gridCellSize;
+            const py = boardOffsetY + r * gridCellSize;
+
+            ctx.beginPath();
+            ctx.arc(px, py, 10, 0, Math.PI * 2);
+            if (val === 1) {
+              ctx.fillStyle = '#111';
+              ctx.fill();
+              ctx.strokeStyle = '#00f0ff';
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            } else {
+              ctx.fillStyle = '#fff';
+              ctx.fill();
+            }
+          }
+        }
+      }
+
+      // 정보 및 턴 표시
+      const myColor = isHost ? 1 : 2;
+      ctx.font = '15px sans-serif';
+
+      ctx.fillStyle = isHost ? '#00f0ff' : '#aaa';
+      ctx.fillText(`흑돌(선공): ${isHost ? '나 (' + myNickname + ')' : targetNickname || '상대방'}`, 30, 80);
+
+      ctx.fillStyle = !isHost ? '#00f0ff' : '#aaa';
+      ctx.fillText(`백돌(후공): ${!isHost ? '나 (' + myNickname + ')' : targetNickname || '상대방'}`, 30, 110);
+
+      ctx.fillStyle = '#ffe600';
+      if (omokWinner === 0) {
+        const turnText = currentTurn === myColor ? '내 턴입니다! (돌을 놓으세요)' : '상대방 턴 대기 중...';
+        ctx.fillText(turnText, 30, 160);
+      } else {
+        const winText = omokWinner === myColor ? '🎉 승리했습니다!' : '패배했습니다.';
+        ctx.fillStyle = omokWinner === myColor ? '#00ff66' : '#ff0055';
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillText(winText, 30, 160);
+        ctx.fillStyle = '#888';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('클릭하면 다시 시작합니다.', 30, 185);
+      }
     }
 
     requestAnimationFrame(gameLoop);
