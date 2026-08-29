@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>멀티플레이 아케이드 - 1:1 대전 Pong</title>
+<!-- P2P 통신 라이브러리 -->
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: sans-serif; background: #121218; color: #fff;
+    height: 100vh; display: flex; overflow: hidden;
+  }
+
+  /* 1. 로그인 창 */
+  #login-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: #0a0a0e; display: flex; justify-content: center; align-items: center;
+    z-index: 1000;
+  }
+  .login-card {
+    background: #1e1e2a; padding: 30px; border-radius: 12px;
+    border: 2px solid #00f0ff; width: 340px; text-align: center;
+  }
+  .login-card h2 { margin-bottom: 20px; color: #00f0ff; }
+  .login-card input {
+    width: 100%; padding: 12px; margin-bottom: 12px;
+    border: 1px solid #333; border-radius: 6px; background: #121218; color: #fff; outline: none;
+  }
+  .login-card button {
+    width: 100%; padding: 12px; background: #00f0ff; color: #000;
+    border: none; border-radius: 6px; font-weight: bold; cursor: pointer;
+  }
+
+  /* 2. 사이드바 */
+  .sidebar {
+    width: 280px; background: #181824; border-right: 1px solid #2a2a3a;
+    padding: 20px; display: flex; flex-direction: column; gap: 20px;
+  }
+  .info-box { background: #222232; padding: 12px; border-radius: 8px; font-size: 13px; color: #aaa; }
+  .info-box strong { color: #00f0ff; font-size: 15px; }
+
+  .dual-box input {
+    width: 100%; padding: 10px; margin: 8px 0;
+    border: 1px solid #333; border-radius: 4px; background: #121218; color: #fff;
+  }
+  .dual-box button {
+    width: 100%; padding: 10px; background: #ff0055; color: #fff;
+    border: none; border-radius: 4px; font-weight: bold; cursor: pointer;
+  }
+
+  .game-select-box select {
+    width: 100%; padding: 10px; margin-top: 8px;
+    border: 1px solid #00f0ff; border-radius: 4px; background: #121218; color: #00f0ff; font-weight: bold; outline: none;
+  }
+
+  .status-tag {
+    font-size: 12px; padding: 6px; border-radius: 4px; background: #222; color: #888; text-align: center;
+  }
+  .status-tag.connected { background: rgba(0, 255, 102, 0.15); color: #00ff66; border: 1px solid #00ff66; }
+
+  /* 3. 게임 영역 */
+  .main-content { flex: 1; display: flex; flex-direction: column; background: #000; }
+  .game-container {
+    flex: 1; display: flex; position: relative; background: #0a0a0e;
+    align-items: center; justify-content: center; overflow: hidden;
+  }
+  
+  canvas { background: #08080c; border: 1px solid #2a2a3a; cursor: crosshair; }
+
+  /* 하단 메모장 */
+  .notepad-container { height: 30%; background: #121218; border-top: 2px solid #2a2a3a; display: flex; flex-direction: column; }
+  .notepad-header { background: #181824; padding: 6px 15px; font-size: 12px; color: #00f0ff; }
+  textarea {
+    flex: 1; width: 100%; padding: 12px; background: transparent;
+    color: #fff; border: none; outline: none; resize: none; font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<!-- 로그인 창 -->
+<div id="login-overlay">
+  <div class="login-card">
+    <h2>멀티 게임 아케이드</h2>
+    <input type="email" id="input-email" placeholder="이메일 입력">
+    <input type="text" id="input-nickname" placeholder="닉네임 입력">
+    <button onclick="handleLogin()">시작하기</button>
+  </div>
+</div>
+
+<!-- 사이드바 -->
+<div class="sidebar">
+  <div class="info-box">
+    <div>계정: <span id="user-email">-</span></div>
+    <div>내 닉네임: <strong id="user-nickname">-</strong></div>
+  </div>
+
+  <div class="dual-box">
+    <h3 style="font-size:14px; color:#00f0ff;">상대방 연동 (멀티)</h3>
+    <input type="text" id="target-nickname" placeholder="상대방 닉네임">
+    <button onclick="connectPeer()">멀티방 연결</button>
+  </div>
+
+  <div class="game-select-box">
+    <h3 style="font-size:14px; color:#00f0ff;">게임 선택</h3>
+    <select id="game-selector" onchange="changeGame(this.value, true)">
+      <option value="bug">1. 버그 잡기 (협동)</option>
+      <option value="pong">2. 핑퐁 (1:1 대전)</option>
+    </select>
+  </div>
+
+  <div id="connection-status" class="status-tag">대기 중...</div>
+</div>
+
+<!-- 메인 콘텐츠 -->
+<div class="main-content">
+  <div class="game-container">
+    <canvas id="gameCanvas" width="800" height="400"></canvas>
+  </div>
+
+  <div class="notepad-container">
+    <div class="notepad-header">공략 메모장 (자동 저장)</div>
+    <textarea id="notepad" placeholder="메모를 입력하세요..."></textarea>
+  </div>
+</div>
+
+<script>
+  let peer = null;
+  let conn = null;
+  let myNickname = '';
+  let targetNickname = '';
+
+  let currentGame = 'bug';
+  let isHost = false;
+
+  // 상대방 데이터 수신 변수
+  let remoteMouse = { x: -100, y: -100 };
+  let remotePaddleY = 160;
+
+  // 메모장 자동 저장
+  const notepad = document.getElementById('notepad');
+  notepad.value = localStorage.getItem('cursor_multi_memo') || '';
+  notepad.addEventListener('input', () => {
+    localStorage.setItem('cursor_multi_memo', notepad.value);
+  });
+
+  function handleLogin() {
+    const email = document.getElementById('input-email').value.trim();
+    const nickname = document.getElementById('input-nickname').value.trim();
+
+    if (!email || !nickname) return alert('이메일과 닉네임을 입력해주세요.');
+
+    myNickname = nickname;
+    document.getElementById('user-email').textContent = email;
+    document.getElementById('user-nickname').textContent = nickname;
+    document.getElementById('login-overlay').style.display = 'none';
+
+    initPeer();
+  }
+
+  function initPeer() {
+    peer = new Peer(myNickname);
+
+    peer.on('open', () => {
+      document.getElementById('connection-status').textContent = '온라인: 연결 대기 중';
+    });
+
+    peer.on('error', (err) => {
+      if (err.type === 'unavailable-id') {
+        alert('이미 사용 중인 닉네임입니다.');
+        location.reload();
+      }
+    });
+
+    peer.on('connection', (connection) => {
+      conn = connection;
+      targetNickname = conn.peer;
+      isHost = true;
+      setupConnection();
+    });
+  }
+
+  function connectPeer() {
+    const target = document.getElementById('target-nickname').value.trim();
+    if (!target) return alert('상대방 닉네임을 입력하세요.');
+    if (target === myNickname) return alert('자신에게는 연결할 수 없습니다.');
+
+    targetNickname = target;
+    conn = peer.connect(target);
+    isHost = false;
+    setupConnection();
+  }
+
+  function setupConnection() {
+    conn.on('open', () => {
+      const statusEl = document.getElementById('connection-status');
+      statusEl.textContent = `연결됨: ${targetNickname}`;
+      statusEl.classList.add('connected');
+
+      conn.send({ type: 'sync_game', game: currentGame });
+    });
+
+    conn.on('data', (data) => {
+      if (data.type === 'sync_game') {
+        changeGame(data.game, false);
+      }
+      
+      if (data.type === 'mouse') {
+        remoteMouse.x = data.x;
+        remoteMouse.y = data.y;
+        if (data.click) checkBugCatch(data.x, data.y);
+      }
+
+      if (data.type === 'pong_paddle') {
+        remotePaddleY = data.y;
+      }
+
+      if (data.type === 'pong_ball') {
+        // 호스트 기준 데이터를 받아서 게스트 시점으로 반전/동기화
+        if (!isHost) {
+          ball.x = canvas.width - data.x;
+          ball.y = data.y;
+          pongScore = { my: data.score.guest, op: data.score.host };
+        }
+      }
+    });
+  }
+
+  function changeGame(gameName, notifyRemote) {
+    currentGame = gameName;
+    document.getElementById('game-selector').value = gameName;
+
+    if (gameName === 'bug') {
+      initBugGame();
+    } else if (gameName === 'pong') {
+      initPongGame();
+    }
+
+    if (notifyRemote && conn && conn.open) {
+      conn.send({ type: 'sync_game', game: gameName });
+    }
+  }
+
+  // --- 게임 엔진 ---
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  // 1. 버그 잡기 게임
+  let bugScore = 0;
+  let bugs = [];
+
+  function initBugGame() {
+    bugs = [];
+    for (let i = 0; i < 5; i++) spawnBug();
+  }
+
+  function spawnBug() {
+    bugs.push({
+      x: Math.random() * (canvas.width - 60) + 30,
+      y: Math.random() * (canvas.height - 60) + 30,
+      size: 15,
+      dx: (Math.random() - 0.5) * 4,
+      dy: (Math.random() - 0.5) * 4
+    });
+  }
+
+  function checkBugCatch(x, y) {
+    bugs.forEach((bug, index) => {
+      const dist = Math.hypot(x - bug.x, y - bug.y);
+      if (dist < bug.size + 10) {
+        bugs.splice(index, 1);
+        bugScore += 100;
+        spawnBug();
+      }
+    });
+  }
+
+  // 2. Pong 1:1 대전 게임
+  let myPaddleY = 160;
+  const paddleWidth = 12;
+  const paddleHeight = 80;
+  let ball = { x: 400, y: 200, dx: 5, dy: 5, size: 8 };
+  let pongScore = { my: 0, op: 0 };
+  let hostScore = { host: 0, guest: 0 };
+
+  function initPongGame() {
+    ball = { x: 400, y: 200, dx: 5, dy: (Math.random() - 0.5) * 6, size: 8 };
+    pongScore = { my: 0, op: 0 };
+    hostScore = { host: 0, guest: 0 };
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (currentGame === 'bug') {
+      if (conn && conn.open) {
+        conn.send({ type: 'mouse', x: x, y: y, click: false });
+      }
+    } else if (currentGame === 'pong') {
+      myPaddleY = Math.max(0, Math.min(canvas.height - paddleHeight, y - paddleHeight / 2));
+      if (conn && conn.open) {
+        conn.send({ type: 'pong_paddle', y: myPaddleY });
+      }
+    }
+  });
+
+  canvas.addEventListener('click', (e) => {
+    if (currentGame === 'bug') {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      checkBugCatch(x, y);
+      if (conn && conn.open) {
+        conn.send({ type: 'mouse', x: x, y: y, click: true });
+      }
+    }
+  });
+
+  initBugGame();
+
+  function gameLoop() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (currentGame === 'bug') {
+      ctx.fillStyle = '#00f0ff';
+      ctx.font = '16px monospace';
+      ctx.fillText(`SCORE: ${bugScore}`, 20, 30);
+
+      bugs.forEach(bug => {
+        bug.x += bug.dx;
+        bug.y += bug.dy;
+
+        if (bug.x < 15 || bug.x > canvas.width - 15) bug.dx *= -1;
+        if (bug.y < 15 || bug.y > canvas.height - 15) bug.dy *= -1;
+
+        ctx.fillStyle = '#ff0055';
+        ctx.beginPath();
+        ctx.arc(bug.x, bug.y, bug.size, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      if (remoteMouse.x >= 0 && remoteMouse.y >= 0) {
+        ctx.fillStyle = '#ffe600';
+        ctx.beginPath();
+        ctx.arc(remoteMouse.x, remoteMouse.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffe600';
+        ctx.font = '12px sans-serif';
+        ctx.fillText(targetNickname || 'P2', remoteMouse.x + 10, remoteMouse.y + 4);
+      }
+
+    } else if (currentGame === 'pong') {
+      // 대전 판 중앙선
+      ctx.strokeStyle = '#2a2a3a';
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(canvas.width / 2, 0);
+      ctx.lineTo(canvas.width / 2, canvas.height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 내 패들(왼쪽: 파란색) & 상대방 패들(오른쪽: 분홍색)
+      ctx.fillStyle = '#00f0ff';
+      ctx.fillRect(20, myPaddleY, paddleWidth, paddleHeight);
+
+      ctx.fillStyle = '#ff0055';
+      ctx.fillRect(canvas.width - 20 - paddleWidth, remotePaddleY, paddleWidth, paddleHeight);
+
+      // 호스트가 공 물리 연산 담당
+      if (isHost || !conn) {
+        ball.x += ball.dx;
+        ball.y += ball.dy;
+
+        // 천장/바닥 충돌
+        if (ball.y - ball.size < 0 || ball.y + ball.size > canvas.height) {
+          ball.dy *= -1;
+        }
+
+        // 호스트 패들(왼쪽) 충돌
+        if (ball.x - ball.size <= 20 + paddleWidth && ball.y >= myPaddleY && ball.y <= myPaddleY + paddleHeight) {
+          ball.dx = Math.abs(ball.dx) * 1.05; // 속도 약간 증가
+        }
+
+        // 게스트 패들(오른쪽) 충돌
+        if (ball.x + ball.size >= canvas.width - 20 - paddleWidth && ball.y >= remotePaddleY && ball.y <= remotePaddleY + paddleHeight) {
+          ball.dx = -Math.abs(ball.dx) * 1.05;
+        }
+
+        // 득점 판정
+        if (ball.x < 0) {
+          hostScore.guest++;
+          resetBall(1);
+        } else if (ball.x > canvas.width) {
+          hostScore.host++;
+          resetBall(-1);
+        }
+
+        pongScore = { my: hostScore.host, op: hostScore.guest };
+
+        if (conn && conn.open) {
+          conn.send({ type: 'pong_ball', x: ball.x, y: ball.y, score: hostScore });
+        }
+      }
+
+      function resetBall(dir) {
+        ball = { x: 400, y: 200, dx: dir * 5, dy: (Math.random() - 0.5) * 6, size: 8 };
+      }
+
+      // 공 그리기
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.size, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 점수 표시 (내 점수 : 상대방 점수)
+      ctx.font = '24px monospace';
+      ctx.fillStyle = '#00f0ff';
+      ctx.fillText(`YOU: ${pongScore.my}`, canvas.width / 2 - 140, 40);
+      ctx.fillStyle = '#ff0055';
+      ctx.fillText(`${targetNickname || 'P2'}: ${pongScore.op}`, canvas.width / 2 + 30, 40);
+    }
+
+    requestAnimationFrame(gameLoop);
+  }
+
+  gameLoop();
+</script>
+</body>
+</html>
